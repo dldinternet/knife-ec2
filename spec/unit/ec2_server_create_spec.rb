@@ -23,7 +23,7 @@ require 'chef/knife/bootstrap_windows_winrm'
 require 'chef/knife/bootstrap_windows_ssh'
 
 describe Chef::Knife::Ec2ServerCreate do
-  before do
+  before(:each) do
     @knife_ec2_create = Chef::Knife::Ec2ServerCreate.new
     @knife_ec2_create.initial_sleep_delay = 0
     @knife_ec2_create.stub(:tcp_test_ssh).and_return(true)
@@ -494,6 +494,33 @@ describe Chef::Knife::Ec2ServerCreate do
       @knife_ec2_create.ui.stub(:error)
     end
 
+    describe "when reading aws_credential_file" do 
+      before do
+        Chef::Config[:knife].delete(:aws_access_key_id)
+        Chef::Config[:knife].delete(:aws_secret_access_key)
+
+        Chef::Config[:knife][:aws_credential_file] = '/apple/pear'
+        @access_key_id = 'access_key_id'
+        @secret_key = 'secret_key'
+      end
+
+      it "reads UNIX Line endings" do
+        File.stub(:read).
+          and_return("AWSAccessKeyId=#{@access_key_id}\nAWSSecretKey=#{@secret_key}")
+        @knife_ec2_create.validate!
+        Chef::Config[:knife][:aws_access_key_id].should == @access_key_id
+        Chef::Config[:knife][:aws_secret_access_key].should == @secret_key
+      end
+
+      it "reads DOS Line endings" do
+        File.stub(:read).
+          and_return("AWSAccessKeyId=#{@access_key_id}\r\nAWSSecretKey=#{@secret_key}")
+        @knife_ec2_create.validate!
+        Chef::Config[:knife][:aws_access_key_id].should == @access_key_id
+        Chef::Config[:knife][:aws_secret_access_key].should == @secret_key
+      end
+    end
+
     it "disallows security group names when using a VPC" do
       @knife_ec2_create.config[:subnet_id] = 'subnet-1a2b3c4d'
       @knife_ec2_create.config[:security_group_ids] = 'sg-aabbccdd'
@@ -511,6 +538,13 @@ describe Chef::Knife::Ec2ServerCreate do
     it "disallows specifying credentials file and aws keys" do
       Chef::Config[:knife][:aws_credential_file] = '/apple/pear'
       File.stub(:read).and_return("AWSAccessKeyId=b\nAWSSecretKey=a")
+
+      lambda { @knife_ec2_create.validate! }.should raise_error SystemExit
+    end
+
+    it "disallows associate public ip option when not using a VPC" do
+      @knife_ec2_create.config[:associate_public_ip] = true
+      @knife_ec2_create.config[:subnet_id] = nil
 
       lambda { @knife_ec2_create.validate! }.should raise_error SystemExit
     end
@@ -597,6 +631,37 @@ describe Chef::Knife::Ec2ServerCreate do
 
       server_def[:iam_instance_profile_name].should == nil
     end
+    
+    it 'Set Tenancy Dedicated when both VPC mode and Flag is True' do
+      @knife_ec2_create.config[:dedicated_instance] = true
+      @knife_ec2_create.stub(:vpc_mode? => true)
+      
+      server_def = @knife_ec2_create.create_server_def
+      server_def[:tenancy].should == "dedicated"
+    end
+    
+    it 'Tenancy should be default with no vpc mode even is specified' do
+      @knife_ec2_create.config[:dedicated_instance] = true
+      
+      server_def = @knife_ec2_create.create_server_def
+      server_def[:tenancy].should == nil
+    end
+    
+    it 'Tenancy should be default with vpc but not requested' do
+      @knife_ec2_create.stub(:vpc_mode? => true)
+      
+      server_def = @knife_ec2_create.create_server_def
+      server_def[:tenancy].should == nil
+    end
+    
+    it "sets associate_public_ip to true if specified and in vpc_mode" do
+      @knife_ec2_create.config[:subnet_id] = 'subnet-1a2b3c4d'
+      @knife_ec2_create.config[:associate_public_ip] = true
+      server_def = @knife_ec2_create.create_server_def
+
+      server_def[:subnet_id].should == 'subnet-1a2b3c4d'
+      server_def[:associate_public_ip].should == true
+    end
   end
 
   describe "ssh_connect_host" do
@@ -620,7 +685,6 @@ describe Chef::Knife::Ec2ServerCreate do
         @knife_ec2_create.stub(:vpc_mode? => true)
         @knife_ec2_create.ssh_connect_host.should == 'private_ip'
       end
-
     end
 
     describe "with custom server attribute" do
@@ -628,6 +692,31 @@ describe Chef::Knife::Ec2ServerCreate do
         @knife_ec2_create.config[:server_connect_attribute] = 'custom'
         @knife_ec2_create.ssh_connect_host.should == 'custom'
       end
+    end
+  end
+
+  describe "tcp_test_ssh" do
+    # Normally we would only get the header after we send a client header, e.g. 'SSH-2.0-client'
+    it "should return true if we get an ssh header" do
+      @knife_ec2_create = Chef::Knife::Ec2ServerCreate.new
+      TCPSocket.stub(:new).and_return(StringIO.new("SSH-2.0-OpenSSH_6.1p1 Debian-4"))
+      IO.stub(:select).and_return(true)
+      @knife_ec2_create.should_receive(:tcp_test_ssh).and_yield.and_return(true)
+      @knife_ec2_create.tcp_test_ssh("blackhole.ninja", 22) {nil}
+    end
+
+    it "should return false if we do not get an ssh header" do
+      @knife_ec2_create = Chef::Knife::Ec2ServerCreate.new
+      TCPSocket.stub(:new).and_return(StringIO.new(""))
+      IO.stub(:select).and_return(true)
+      @knife_ec2_create.tcp_test_ssh("blackhole.ninja", 22).should be_false
+    end
+
+    it "should return false if the socket isn't ready" do
+      @knife_ec2_create = Chef::Knife::Ec2ServerCreate.new
+      TCPSocket.stub(:new)
+      IO.stub(:select).and_return(false)
+      @knife_ec2_create.tcp_test_ssh("blackhole.ninja", 22).should be_false
     end
   end
 end
